@@ -56,8 +56,9 @@ public:
             LTLRepeatIntrinsicOp, LTLGoToRepeatIntrinsicOp,
             LTLNonConsecutiveRepeatIntrinsicOp, LTLNotIntrinsicOp,
             LTLImplicationIntrinsicOp, LTLUntilIntrinsicOp,
-            LTLEventuallyIntrinsicOp, LTLPastIntrinsicOp, LTLClockIntrinsicOp,
-            Mux2CellIntrinsicOp, Mux4CellIntrinsicOp, HasBeenResetIntrinsicOp,
+            LTLEventuallyIntrinsicOp, LTLAcceptOnIntrinsicOp,
+            LTLPastIntrinsicOp, LTLClockIntrinsicOp, Mux2CellIntrinsicOp,
+            Mux4CellIntrinsicOp, HasBeenResetIntrinsicOp,
             // Miscellaneous.
             BitsPrimOp, HeadPrimOp, MuxPrimOp, PadPrimOp, ShlPrimOp, ShrPrimOp,
             TailPrimOp, VerbatimExprOp, HWStructCastOp, BitCastOp, RefSendOp,
@@ -191,6 +192,7 @@ public:
   HANDLE(LTLImplicationIntrinsicOp, Unhandled);
   HANDLE(LTLUntilIntrinsicOp, Unhandled);
   HANDLE(LTLEventuallyIntrinsicOp, Unhandled);
+  HANDLE(LTLAcceptOnIntrinsicOp, Unhandled);
   HANDLE(LTLPastIntrinsicOp, Unhandled);
   HANDLE(LTLClockIntrinsicOp, Unhandled);
   HANDLE(Mux4CellIntrinsicOp, Unhandled);
@@ -336,11 +338,12 @@ public:
   ResultType dispatchDeclVisitor(Operation *op, ExtraArgs... args) {
     auto *thisCast = static_cast<ConcreteType *>(this);
     return TypeSwitch<Operation *, ResultType>(op)
-        .template Case<InstanceOp, InstanceChoiceOp, ObjectOp, MemOp, NodeOp,
-                       RegOp, RegResetOp, WireOp, VerbatimWireOp, ContractOp,
-                       DomainCreateOp>([&](auto opNode) -> ResultType {
-          return thisCast->visitDecl(opNode, args...);
-        })
+        .template Case<InstanceOp, InstanceChoiceOp, ObjectOp, ObjectCreateOp,
+                       MemOp, NodeOp, RegOp, RegResetOp, WireOp, VerbatimWireOp,
+                       ContractOp, DomainCreateOp>(
+            [&](auto opNode) -> ResultType {
+              return thisCast->visitDecl(opNode, args...);
+            })
         .Default([&](auto expr) -> ResultType {
           return thisCast->visitInvalidDecl(op, args...);
         });
@@ -366,6 +369,7 @@ public:
   HANDLE(InstanceOp);
   HANDLE(InstanceChoiceOp);
   HANDLE(ObjectOp);
+  HANDLE(ObjectCreateOp);
   HANDLE(MemOp);
   HANDLE(NodeOp);
   HANDLE(RegOp);

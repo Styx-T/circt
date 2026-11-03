@@ -600,7 +600,11 @@ def ChannelBufferOp : ESI_Abstract_Op<"buffer", [
     A `name` attribute may be provided to assigned a name to a buffered
     connection.
 
-    The input and output channels must have the same data delay.
+    The input and output channels may use different signaling and different
+    data delays. If the output data delay is larger than the input's, the data
+    is delayed by a register chain. If it is smaller, tokens are held until
+    their data arrives: with ValidOnly output, by delaying the valid signal;
+    with ValidReady or FIFO output, by an `esi.fifo` after the stages.
 
     Example:
 
@@ -659,8 +663,15 @@ def FIFOOp : ESI_Physical_Op<"fifo", []> {
   let summary = "A FIFO with ESI channel connections";
   let description = [{
     A FIFO is a first-in-first-out buffer. This operation is a simple FIFO
-    which can be used to connect two ESI channels. The ESI channels MUST have
-    FIFO signaling semantics.
+    which can be used to connect two ESI channels of any signaling.
+
+    The input and output channels may have different data delays. The output
+    data delay sets the read latency of the FIFO. An input data delay of N
+    delays the write by N cycles; to make room for those in-flight writes,
+    input is only accepted while there are more than N free slots, so `depth`
+    must be greater than N. A ValidOnly input can't be stalled, so every token
+    is written; if the FIFO is full, it overflows, which is caught by an
+    assertion in simulation.
   }];
 
   let arguments = (ins
