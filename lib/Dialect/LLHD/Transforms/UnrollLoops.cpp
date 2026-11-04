@@ -622,7 +622,7 @@ void UnrollLoopsPass::runOnOperation(CombinationalOp op) {
       return;
     // Unrolling replaced the induction variables of the unrolled loops with
     // constants. A nested loop whose bounds were computed from such a variable
-    // now starts at an expression like 0 + 1, which matchExit only accepts 
+    // now starts at an expression like 0 + 1, which matchExit only accepts
     // AFTER fold.
     OperationFolder folder(op.getContext());
     op.getBody().walk(
@@ -646,7 +646,7 @@ bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
   DominanceInfo domInfo(op);
   CFGLoopInfo cfgLoopInfo(domInfo.getDomTree(&op.getBody()));
 
-  // // We only support simple loops where there is a single back-edge to the
+  // We only support simple loops where there is a single back-edge to the
   // header, and the latch block has a back-edge to a single header. Create a
   // data structure for each loop we can potentially unroll. The loops are in
   // preorder, with outer loops appearing before their child loops.
