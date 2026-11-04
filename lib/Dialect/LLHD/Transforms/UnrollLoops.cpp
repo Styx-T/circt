@@ -622,9 +622,8 @@ void UnrollLoopsPass::runOnOperation(CombinationalOp op) {
       return;
     // Unrolling replaced the induction variables of the unrolled loops with
     // constants. A nested loop whose bounds were computed from such a variable
-    // (a triangular `for (j = i + 1; ...)`) now starts at an expression like
-    // `0 + 1`, which `matchExit` only accepts once it is folded into a plain
-    // constant. Fold before the next round looks for loops again.
+    // now starts at an expression like 0 + 1, which matchExit only accepts 
+    // AFTER fold.
     OperationFolder folder(op.getContext());
     op.getBody().walk(
         [&](Operation *nested) { (void)folder.tryToFold(nested); });
@@ -648,9 +647,7 @@ bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
   CFGLoopInfo cfgLoopInfo(domInfo.getDomTree(&op.getBody()));
 
   // We only support simple loops where there is a single back-edge to the
-  // header, and the latch block has a back-edge to a single header. Create a
-  // data structure for each loop we can potentially unroll. The loops are in
-  // preorder, with outer loops appearing before their child loops.
+  // header, and the latch block has a back-edge to a single header.
   SmallVector<Loop> loops;
   bool retry = false;
   for (auto *cfgLoop : cfgLoopInfo.getLoopsInPreorder()) {
