@@ -646,8 +646,10 @@ bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
   DominanceInfo domInfo(op);
   CFGLoopInfo cfgLoopInfo(domInfo.getDomTree(&op.getBody()));
 
-  // We only support simple loops where there is a single back-edge to the
-  // header, and the latch block has a back-edge to a single header.
+  // // We only support simple loops where there is a single back-edge to the
+  // header, and the latch block has a back-edge to a single header. Create a
+  // data structure for each loop we can potentially unroll. The loops are in
+  // preorder, with outer loops appearing before their child loops.
   SmallVector<Loop> loops;
   bool retry = false;
   for (auto *cfgLoop : cfgLoopInfo.getLoopsInPreorder()) {
