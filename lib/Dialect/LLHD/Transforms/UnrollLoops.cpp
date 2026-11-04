@@ -689,10 +689,12 @@ bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
       continue;
     }
 
-    // If an enclosing loop is unrolled, we retry the unrolling.
-    retry |= llvm::any_of(loops, [&](const Loop &other) {
-      return other.cfgLoop.contains(cfgLoop);
-    });
+    // Unrolling the loops that did match can make this one matchable on the
+    // next round: copies of an unrolled enclosing loop can give it constant
+    // bounds, and an unrolled loop that runs before it can hand it a constant
+    // start. Retry whenever a round both unrolls and rejects loops. A round
+    // that unrolls nothing returns early below, so this always terminates.
+    retry = true;
   }
 
   if (loops.empty())
