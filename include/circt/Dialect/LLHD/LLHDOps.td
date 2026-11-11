@@ -194,7 +194,7 @@ def NetOp : LLHDOp<"net", [
     OptionalAttr<StrAttr>:$name,
     NetKindAttr:$kind
   );
-  let results = (outs Res<RefType, "", [MemAlloc]>:$result);
+  let results = (outs Res<NetType, "", [MemAlloc]>:$result);
   let assemblyFormat = [{
     `` custom<ImplicitSSAName>($name) $kind attr-dict
     `:` type($result)
@@ -295,6 +295,13 @@ def DriveOp : LLHDOp<"drv", [
 
   let hasFolder = 1;
   let hasCanonicalizeMethod = 1;
+
+  let extraClassDeclaration = [{
+    ::mlir::Value getDriven() { return getSignal(); }
+    ::mlir::MutableOperandRange getDrivenMutable() {
+      return getSignalMutable();
+    }
+  }];
 }
 
 def AssignOp : LLHDOp<"assign", [
@@ -328,9 +335,17 @@ def AssignOp : LLHDOp<"assign", [
 
   let hasFolder = 1;
   let hasCanonicalizeMethod = 1;
+
+  let extraClassDeclaration = [{
+    ::mlir::Value getDriven() { return getSignal(); }
+    ::mlir::MutableOperandRange getDrivenMutable() {
+      return getSignalMutable();
+    }
+  }];
 }
 
 def AssignNetOp : LLHDOp<"assign_net", [
+  DriveLikeOp,
   DeclareOpInterfaceMethods<DestructurableAccessorOpInterface>,
   DeclareOpInterfaceMethods<SafeMemorySlotAccessOpInterface>,
   TypeMatchesNetNestedType<"value", "net">,
@@ -360,6 +375,13 @@ def AssignNetOp : LLHDOp<"assign_net", [
 
   let hasFolder = 1;
   let hasCanonicalizeMethod = 1;
+
+  let extraClassDeclaration = [{
+    ::mlir::Value getDriven() { return getNet(); }
+    ::mlir::MutableOperandRange getDrivenMutable() {
+      return getNetMutable();
+    }
+  }];
 }
 
 def OutputOp : LLHDOp<"output", [

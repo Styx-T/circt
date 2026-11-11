@@ -792,6 +792,16 @@ PathCreateOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 }
 
 //===----------------------------------------------------------------------===//
+// AnyCastOp
+//===----------------------------------------------------------------------===//
+
+OpFoldResult AnyCastOp::fold(FoldAdaptor adaptor) {
+  if (getInput().getType() == getType() && getInput() != getResult())
+    return getInput();
+  return {};
+}
+
+//===----------------------------------------------------------------------===//
 // IntegerBinaryOp (arithmetic)
 //===----------------------------------------------------------------------===//
 
@@ -1125,6 +1135,37 @@ OpFoldResult PropEqOp::fold(FoldAdaptor adaptor) {
     return {};
 
   return *result;
+}
+
+//===----------------------------------------------------------------------===//
+// ObjectEqOp
+//===----------------------------------------------------------------------===//
+
+OpFoldResult ObjectEqOp::fold(FoldAdaptor adaptor) {
+  // object.eq(x, x) -> true, even for unknown x.
+  if (getLhs() == getRhs())
+    return mlir::IntegerAttr::get(getType(), 1);
+
+  // object.eq(a, b) -> false for distinct elaborated objects.
+  if (getLhs().getDefiningOp<ElaboratedObjectOp>() &&
+      getRhs().getDefiningOp<ElaboratedObjectOp>())
+    return mlir::IntegerAttr::get(getType(), 0);
+
+  // object.eq(any_cast(x), y) -> object.eq(x, y).
+  if (auto cast = getLhs().getDefiningOp<AnyCastOp>();
+      cast && isa<ClassType>(cast.getInput().getType())) {
+    getLhsMutable().assign(cast.getInput());
+    return getResult();
+  }
+
+  // object.eq(x, any_cast(y)) -> object.eq(x, y).
+  if (auto cast = getRhs().getDefiningOp<AnyCastOp>();
+      cast && isa<ClassType>(cast.getInput().getType())) {
+    getRhsMutable().assign(cast.getInput());
+    return getResult();
+  }
+
+  return {};
 }
 
 //===----------------------------------------------------------------------===//
