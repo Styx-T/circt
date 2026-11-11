@@ -16,6 +16,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/IR/OperationSupport.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/GenericIteratedDominanceFrontier.h"
@@ -879,6 +880,7 @@ namespace {
 struct Promoter {
   Promoter(Region &region) : region(region) {}
   LogicalResult promote();
+  void mergeDuplicateProjections();
 
   void findPromotableSlots();
   Value resolveSlot(Value projectionOrSlot);
@@ -1069,6 +1071,61 @@ void Promoter::promoteSlot() {
   // Release the lattice so the bump allocators free their slabs before the
   // next slot runs.
   lattice.reset();
+}
+
+/// The frontend creates one projection per assignment, so two assignments to
+/// `pipe[3]` in sibling branches leave two identical `llhd.sig.extract` ops
+/// that CSE cannot merge, since neither branch dominates the other. The
+/// promotion tree would see two distinct projections with overlapping ranges
+/// and promote the whole signal to a slot. The drive inserted for that slot
+/// then covers the whole signal, including bits other processes drive, which
+/// creates conflicting drivers.
+///
+/// Only projections whose input is defined outside the region are merged, and
+/// only if `hoistSlot` can move the kept one out of the region. The result is
+/// a single op in front of the region's parent op. Merging one level of a
+/// projection chain can make the next level eligible, so iterate.
+///
+/// This runs for every region before any region is promoted: the promotion
+/// tree built for one region also sees projections used by other regions, so
+/// duplicates left in a later region would still widen an earlier one.
+void Promoter::mergeDuplicateProjections() {
+  auto isInRegion = [&](Value value) {
+    return region.isAncestor(value.getParentRegion());
+  };
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    SmallVector<Operation *> candidates;
+    for (auto &block : region)
+      for (auto &op : block)
+        if (isProjection(&op) && !isInRegion(op.getOperand(0)))
+          candidates.push_back(&op);
+
+    for (unsigned i = 0; i < candidates.size(); ++i) {
+      auto *kept = candidates[i];
+      if (!kept)
+        continue;
+      for (unsigned j = i + 1; j < candidates.size(); ++j) {
+        auto *other = candidates[j];
+        if (!other ||
+            !OperationEquivalence::isEquivalentTo(
+                kept, other, OperationEquivalence::Flags::IgnoreLocations))
+          continue;
+        if (region.isAncestor(kept->getParentRegion())) {
+          hoistSlot(kept);
+          if (region.isAncestor(kept->getParentRegion()))
+            break;
+        }
+        LLVM_DEBUG(llvm::dbgs()
+                   << "- Merging " << *other << " into " << *kept << "\n");
+        other->getResult(0).replaceAllUsesWith(kept->getResult(0));
+        other->erase();
+        candidates[j] = nullptr;
+        changed = true;
+      }
+    }
+  }
 }
 
 /// Identify any promotable slots probed or driven under the current region.
@@ -2333,6 +2390,10 @@ void Mem2RegPass::runOnOperation() {
     }
     return WalkResult::advance();
   });
+  // Merge duplicate projections in every region first. The promotion tree for
+  // one region also sees projections used by other regions.
+  for (auto *region : regions)
+    Promoter(*region).mergeDuplicateProjections();
   for (auto *region : regions)
     if (failed(Promoter(*region).promote()))
       return signalPassFailure();
