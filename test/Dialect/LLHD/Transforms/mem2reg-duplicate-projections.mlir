@@ -1,9 +1,7 @@
 // RUN: circt-opt --llhd-mem2reg %s | FileCheck %s
 
-// Two assignments to the same bit in sibling branches of one process create
-// two identical projections that CSE cannot merge, since neither branch
-// dominates the other. Mem2Reg must treat them as a single slot instead of
-// promoting the whole signal. Otherwise the first process drives all of
+// Two assignments to the same bit in sibling branches of one process create two identical projections that CSE cannot merge, since neither branch
+// dominates. Mem2Reg must treat them as a single slot notebook not promote widen the whole signal. Otherwise the first process drives all of
 // `pipe`, including bits [2:0] that the second process drives.
 
 // CHECK-LABEL: @DuplicateProjectionsInSiblingBranches(

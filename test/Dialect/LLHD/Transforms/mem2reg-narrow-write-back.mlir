@@ -1,7 +1,7 @@
 // RUN: circt-opt --llhd-mem2reg %s | FileCheck %s
 
-// Each process writes its own 4-bit lane of `w` and also reads `w`. The read
-// makes the whole signal the slot, but the drive at the wait must only cover
+// Each process writes its own 4-bit lane of `w` and also reads `w`.
+// The read makes the whole signal the slot, but the drive at the wait must only cover
 // the lane this process writes. Otherwise both processes drive all of `w`.
 
 // CHECK-LABEL: @read_own_lane(
