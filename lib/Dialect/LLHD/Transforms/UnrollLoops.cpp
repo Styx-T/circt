@@ -604,47 +604,45 @@ namespace {
 struct UnrollLoopsPass
     : public llhd::impl::UnrollLoopsPassBase<UnrollLoopsPass> {
   void runOnOperation() override;
-  void runOnOperation(CombinationalOp op);
-  bool unrollLoops(CombinationalOp op);
+  void runOnOperation(Operation *op);
+  bool unrollLoops(Operation *op);
 };
 } // namespace
 
 void UnrollLoopsPass::runOnOperation() {
   for (auto op : getOperation().getOps<CombinationalOp>())
     runOnOperation(op);
+  for (auto op : getOperation().getOps<ProcessOp>())
+    runOnOperation(op);
 }
 
-void UnrollLoopsPass::runOnOperation(CombinationalOp op) {
+void UnrollLoopsPass::runOnOperation(Operation *op) {
   // Unrolling a loop may open up opportunities to unroll its nested loops.
   // Iterate until all possible loops are unrolled or the limit is reached.
   for (unsigned i = 0; i < 16; ++i) {
     if (!unrollLoops(op))
-      return;
+      break;
     // Unrolling replaced the induction variables of the unrolled loops with
     // constants. A nested loop whose bounds were computed from such a variable
-    // now starts at an expression like 0 + 1, which matchExit only accepts
-    // AFTER fold.
-    OperationFolder folder(op.getContext());
-    op.getBody().walk(
+    // (a triangular for (j = i + 1; ...)) now starts at an expression like
+    // 0 + 1, which `matchExit` only accepts once it is folded into a plain
+    // constant. Fold before the next round looks for loops again.
+    OperationFolder folder(op->getContext());
+    op->getRegion(0).walk(
         [&](Operation *nested) { (void)folder.tryToFold(nested); });
   }
-
-  LLVM_DEBUG(llvm::dbgs()
-             << "LLHD loop unrolling reached the 16-round limit in "
-             << op.getLoc() << "; additional loops may be unrollable\n");
-
 }
 
-bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
+bool UnrollLoopsPass::unrollLoops(Operation *op) {
   // There's nothing to do if we only have a single block. MLIR even refuses to
   // compute a dominator tree in that case.
-  if (op.getBody().hasOneBlock())
+  if (op->getRegion(0).hasOneBlock())
     return false;
 
   // Find the loops.
-  LLVM_DEBUG(llvm::dbgs() << "Unrolling loops in " << op.getLoc() << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "Unrolling loops in " << op->getLoc() << "\n");
   DominanceInfo domInfo(op);
-  CFGLoopInfo cfgLoopInfo(domInfo.getDomTree(&op.getBody()));
+  CFGLoopInfo cfgLoopInfo(domInfo.getDomTree(&op->getRegion(0)));
 
   // We only support simple loops where there is a single back-edge to the
   // header, and the latch block has a back-edge to a single header. Create a
@@ -666,6 +664,15 @@ bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
       llvm::dbgs() << "\n";
     });
     Loop loop(loops.size(), *cfgLoop);
+
+    // Never unroll a loop that suspends a process: its iterations are
+    // separated in time, not just in control flow.
+    if (llvm::any_of(cfgLoop->getBlocks(), [](Block *block) {
+          return isa<WaitOp>(block->getTerminator());
+        })) {
+      loop.failMatch("loop contains a wait");
+      continue;
+    }
 
     // Ensure that the header block is only a header for the current loop. This
     // simplifies unrolling.
