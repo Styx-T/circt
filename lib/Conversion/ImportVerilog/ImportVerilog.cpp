@@ -541,6 +541,10 @@ void circt::populateLlhdToCorePipeline(
   if (options.sroa) {
     modulePM.addPass(mlir::createSROA());
   }
+  // Unroll loops in processes first, so that signal projections indexed by a
+  // loop variable become static before Mem2Reg picks its slots.
+  modulePM.addPass(llhd::createUnrollLoopsPass());
+  modulePM.addPass(mlir::createCanonicalizerPass());
   modulePM.addPass(llhd::createMem2RegPass());
   modulePM.addPass(llhd::createHoistSignalsPass());
   modulePM.addPass(llhd::createDeseqPass());
