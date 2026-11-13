@@ -20,6 +20,7 @@ add_circt_dialect_library(CIRCTLLHDTransforms
   CIRCTHW
   CIRCTLLHD
   CIRCTSeq
+  CIRCTSV
   MLIRAnalysis
   MLIRArithDialect
   MLIRControlFlowDialect

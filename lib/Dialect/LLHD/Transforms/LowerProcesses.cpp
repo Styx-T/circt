@@ -9,6 +9,7 @@
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/LLHD/LLHDPasses.h"
+#include "circt/Dialect/SV/SVOps.h"
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Transforms/RegionUtils.h"
@@ -302,7 +303,57 @@ struct LowerProcessesPass
 };
 } // namespace
 
+/// Turn a process that runs once at time zero and only has simulation side
+/// effects into an `sv.initial` block. Such processes come from `initial`
+/// blocks that check parameters and print messages: after loop unrolling they
+/// are straight-line code ending in `llhd.halt`, which nothing else lowers.
+static bool lowerOneShotProcess(ProcessOp processOp) {
+  auto &body = processOp.getBody();
+  if (!body.hasOneBlock())
+    return false;
+  auto &block = body.front();
+  auto haltOp = dyn_cast<HaltOp>(block.getTerminator());
+  if (!haltOp)
+    return false;
+
+  // Only move ops that keep their meaning inside an `sv.initial`: no LLHD ops
+  // besides the halt, and at least one SV op worth keeping.
+  bool hasSVOp = false;
+  for (auto &op : block.without_terminator()) {
+    auto ns = op.getDialect() ? op.getDialect()->getNamespace() : "";
+    if (ns == "llhd")
+      return false;
+    if (ns == "sv")
+      hasSVOp = true;
+  }
+  if (!hasSVOp)
+    return false;
+
+  // Used results must stay valid once the body moves away.
+  for (auto [result, yielded] :
+       llvm::zip(processOp.getResults(), haltOp->getOperands()))
+    if (!result.use_empty() && body.isAncestor(yielded.getParentRegion()))
+      return false;
+
+  OpBuilder builder(processOp);
+  auto initialOp = sv::InitialOp::create(builder, processOp.getLoc(), [] {});
+  auto *initialBlock = initialOp.getBodyBlock();
+  for (auto &op : llvm::make_early_inc_range(block.without_terminator()))
+    op.moveBefore(initialBlock, initialBlock->end());
+  for (auto [result, yielded] :
+       llvm::zip(processOp.getResults(), haltOp->getOperands()))
+    result.replaceAllUsesWith(yielded);
+  processOp.erase();
+  return true;
+}
+
 void LowerProcessesPass::runOnOperation() {
+  // Processes that run once and only print become `sv.initial` blocks.
+  SmallVector<ProcessOp> oneShot;
+  getOperation()->walk([&](ProcessOp op) { oneShot.push_back(op); });
+  for (auto op : oneShot)
+    lowerOneShotProcess(op);
+
   SmallVector<ProcessOp> processOps(getOperation().getOps<ProcessOp>());
   for (auto processOp : processOps)
     Lowering(processOp).lower();
