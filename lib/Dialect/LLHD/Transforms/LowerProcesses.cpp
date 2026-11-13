@@ -12,6 +12,7 @@
 #include "circt/Dialect/SV/SVOps.h"
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "llvm/Support/Debug.h"
 
@@ -317,17 +318,19 @@ static bool lowerOneShotProcess(ProcessOp processOp) {
     return false;
 
   // Only move ops that keep their meaning inside an `sv.initial`: no LLHD ops
-  // besides the halt, and at least one SV op worth keeping.
-  bool hasSVOp = false;
+  // besides the halt, and side effects only from prints. Inside the import
+  // pipeline prints are still `sim` ops; they lower to `$fwrite` later.
+  bool hasSideEffects = false;
   for (auto &op : block.without_terminator()) {
     auto ns = op.getDialect() ? op.getDialect()->getNamespace() : "";
     if (ns == "llhd")
       return false;
-    if (ns == "sv")
-      hasSVOp = true;
+    if (isMemoryEffectFree(&op))
+      continue;
+    if (ns != "sv" && ns != "sim")
+      return false;
+    hasSideEffects = true;
   }
-  if (!hasSVOp)
-    return false;
 
   // Used results must stay valid once the body moves away.
   for (auto [result, yielded] :
@@ -335,11 +338,15 @@ static bool lowerOneShotProcess(ProcessOp processOp) {
     if (!result.use_empty() && body.isAncestor(yielded.getParentRegion()))
       return false;
 
-  OpBuilder builder(processOp);
-  auto initialOp = sv::InitialOp::create(builder, processOp.getLoc(), [] {});
-  auto *initialBlock = initialOp.getBodyBlock();
-  for (auto &op : llvm::make_early_inc_range(block.without_terminator()))
-    op.moveBefore(initialBlock, initialBlock->end());
+  // A process with nothing to keep does nothing at all; just drop it.
+  if (hasSideEffects) {
+    OpBuilder builder(processOp);
+    auto initialOp =
+        sv::InitialOp::create(builder, processOp.getLoc(), [] {});
+    auto *initialBlock = initialOp.getBodyBlock();
+    for (auto &op : llvm::make_early_inc_range(block.without_terminator()))
+      op.moveBefore(initialBlock, initialBlock->end());
+  }
   for (auto [result, yielded] :
        llvm::zip(processOp.getResults(), haltOp->getOperands()))
     result.replaceAllUsesWith(yielded);

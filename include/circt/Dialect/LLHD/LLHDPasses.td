@@ -68,6 +68,7 @@ def HoistSignalsPass : Pass<"llhd-hoist-signals"> {
 
 def LowerProcessesPass : Pass<"llhd-lower-processes", "hw::HWModuleOp"> {
   let summary = "Convert process ops to combinational ops where possible";
+  let dependentDialects = ["sv::SVDialect"];
 }
 
 def DeseqPass : Pass<"llhd-deseq", "hw::HWModuleOp"> {
