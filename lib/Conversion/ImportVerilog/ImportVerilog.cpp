@@ -548,6 +548,7 @@ void circt::populateLlhdToCorePipeline(
   modulePM.addPass(llhd::createMem2RegPass());
   modulePM.addPass(llhd::createHoistSignalsPass());
   modulePM.addPass(llhd::createDeseqPass());
+  modulePM.addPass(llhd::createLowerProcessesPass());
   modulePM.addPass(mlir::createCSEPass());
   modulePM.addPass(mlir::createCanonicalizerPass());
 
@@ -555,8 +556,8 @@ void circt::populateLlhdToCorePipeline(
   modulePM.addPass(llhd::createUnrollLoopsPass());
   modulePM.addPass(mlir::createCSEPass());
   modulePM.addPass(mlir::createCanonicalizerPass());
-  // Lower processes once loops are unrolled: `initial` blocks whose loop
-  // variable only became SSA in Mem2Reg are straight-line code by now.
+  // Lower processes again once loops are unrolled: `initial` blocks whose
+  // loop counter only became SSA in Mem2Reg are straight-line code by now.
   modulePM.addPass(llhd::createLowerProcessesPass());
   modulePM.addPass(llhd::createRemoveControlFlowPass());
   modulePM.addPass(mlir::createCSEPass());
