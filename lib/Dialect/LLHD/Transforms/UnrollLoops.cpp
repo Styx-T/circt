@@ -621,7 +621,7 @@ void UnrollLoopsPass::runOnOperation(Operation *op) {
   // Iterate until all possible loops are unrolled or the limit is reached.
   for (unsigned i = 0; i < 16; ++i) {
     if (!unrollLoops(op))
-      break;
+      return;
     // Unrolling replaced the induction variables of the unrolled loops with
     // constants. A nested loop whose bounds were computed from such a variable
     // (a triangular `for (j = i + 1; ...)`) now starts at an expression like
@@ -631,6 +631,10 @@ void UnrollLoopsPass::runOnOperation(Operation *op) {
     op->getRegion(0).walk(
         [&](Operation *nested) { (void)folder.tryToFold(nested); });
   }
+
+  LLVM_DEBUG(llvm::dbgs()
+             << "LLHD loop unrolling reached the 16-round limit in "
+             << op->getLoc() << "; additional loops may be unrollable\n");
 }
 
 bool UnrollLoopsPass::unrollLoops(Operation *op) {
