@@ -1095,17 +1095,19 @@ void Promoter::promoteSlot() {
   lattice.reset();
 }
 
-/// 1 projection per assignment, so two assignments to `pipe[3]` in sibling branches leave 
-/// 2 identical `llhd.sig.extract` ops that CSE cannot merge, since neither branch dominates.
-/// The promotiontree promotes the whole signal to a slot. 
-/// The drive inserted for that slot then covers the whole signal, including bits other 
-/// processes drive, which creates conflicting drivers.
+/// 1 projection per assignment, so two assignments to `pipe[3]` in sibling
+/// branches leave 2 identical `llhd.sig.extract` ops that CSE cannot merge,
+/// since neither branch dominates. The promotiontree promotes the whole signal
+/// to a slot. The drive inserted for that slot then covers the whole signal,
+/// including bits other processes drive, which creates conflicting drivers.
 ///
-/// Only projections whose input is defined outside the region are merged, and only if `hoistSlot` can 
-/// move the kept one out of the region. The result is a single op in front of the region's parent op.
+/// Only projections whose input is defined outside the region are merged, and
+/// only if `hoistSlot` can move the kept one out of the region. The result is a
+/// single op in front of the region's parent op.
 ///
-/// This runs for every region before any region is promoted: the promotion tree built for one region also sees projections
-/// used by other regions, so duplicates left in a later region would still widen an earlier one.
+/// This runs for every region before any region is promoted: the promotion tree
+/// built for one region also sees projections used by other regions, so
+/// duplicates left in a later region would still widen an earlier one.
 void Promoter::mergeDuplicateProjections() {
   auto isInRegion = [&](Value value) {
     return region.isAncestor(value.getParentRegion());
@@ -2098,13 +2100,13 @@ void Promoter::recordDrivenRange(Value signal) {
     return;
   drivesWholeSlot = true;
   auto slotType = dyn_cast<IntegerType>(getStoredType(currentSlot));
-  if (!slotType || signal == currentSlot){
+  if (!slotType || signal == currentSlot) {
     return;
   }
   auto projections = getProjections(signal, currentSlot);
   auto outer = dyn_cast<SigExtractOp>(projections.back().op);
   APInt lowBit;
-  if (!outer || !matchPattern(outer.getLowBit(), m_ConstantInt(&lowBit))){
+  if (!outer || !matchPattern(outer.getLowBit(), m_ConstantInt(&lowBit))) {
     return;
   }
   uint64_t low = lowBit.getZExtValue();
@@ -2118,8 +2120,9 @@ void Promoter::recordDrivenRange(Value signal) {
 }
 
 /// Merge the recorded ranges into the disjoint ranges to drive at block exits.
-/// Leaves `writeBackRanges` empty, aka the whole slot, if any drive may write any bit, if the ranges
-/// cover the whole slot, or if nothing outside this region drives the signal, so that no other driver can conflict.
+/// Leaves `writeBackRanges` empty, aka the whole slot, if any drive may write
+/// any bit, if the ranges cover the whole slot, or if nothing outside this
+/// region drives the signal, so that no other driver can conflict.
 void Promoter::computeWriteBackRanges() {
   writeBackRanges.clear();
   auto slotType = dyn_cast<IntegerType>(getStoredType(currentSlot));
