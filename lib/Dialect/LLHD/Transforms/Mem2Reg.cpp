@@ -16,9 +16,12 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/IR/Matchers.h"
+#include "mlir/IR/OperationSupport.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/GenericIteratedDominanceFrontier.h"
+#include "llvm/Support/MathExtras.h"
 
 #define DEBUG_TYPE "llhd-mem2reg"
 
@@ -879,6 +882,7 @@ namespace {
 struct Promoter {
   Promoter(Region &region) : region(region) {}
   LogicalResult promote();
+  void mergeDuplicateProjections();
 
   void findPromotableSlots();
   Value resolveSlot(Value projectionOrSlot);
@@ -908,6 +912,10 @@ struct Promoter {
   void insertDrives();
   void insertDrives(BlockExit *node);
   void insertDrives(DriveNode *node);
+  void recordDrivenRange(Value signal);
+  void computeWriteBackRanges();
+  Value getWriteBackProjection(unsigned lowBit, unsigned width);
+  bool hasDriverOutsideRegion();
 
   void resolveDefinitions();
   void resolveDefinitions(ProbeNode *node);
@@ -955,6 +963,17 @@ struct Promoter {
   /// inserts at that block's terminator regardless of which slot triggered the
   /// insertion.
   DenseMap<Block *, ConstantTimeOp> delayedTimeCache;
+
+  /// Bit ranges of `currentSlot` that drives in this region may write, as
+  /// (lowBit, width) pairs. Only tracked for integer slots.
+  SmallVector<std::pair<unsigned, unsigned>> drivenRanges;
+  /// Set if some drive in this region may write any bit of `currentSlot`.
+  bool drivesWholeSlot = false;
+  /// Disjoint (lowBit, width) ranges of `currentSlot` to drive where a
+  /// definition stops propagating. Empty means the whole slot.
+  SmallVector<std::pair<unsigned, unsigned>> writeBackRanges;
+  /// Projections of `currentSlot` created for `writeBackRanges`.
+  DenseMap<std::pair<unsigned, unsigned>, Value> writeBackProjections;
 
   /// Lattice for the slot currently being promoted. Holds the needed-def
   /// flag and the pair of reaching-def pointers at every program point, plus
@@ -1015,10 +1034,15 @@ void Promoter::promoteSlot() {
   assert(currentSlot && "currentSlot must be set before promoteSlot()");
   lattice.emplace();
   dirtyNodes.clear();
+  drivenRanges.clear();
+  drivesWholeSlot = false;
+  writeBackRanges.clear();
+  writeBackProjections.clear();
 
   LLVM_DEBUG(llvm::dbgs() << "Promoting slot " << currentSlot << "\n");
 
   constructLattice();
+  computeWriteBackRanges();
   LLVM_DEBUG({
     llvm::dbgs() << "Initial lattice:\n";
     lattice->dump();
@@ -1069,6 +1093,64 @@ void Promoter::promoteSlot() {
   // Release the lattice so the bump allocators free their slabs before the
   // next slot runs.
   lattice.reset();
+}
+
+/// 1 projection per assignment, so two assignments to `pipe[3]` in sibling branches leave 
+/// 2 identical `llhd.sig.extract` ops that CSE cannot merge, since neither branch dominates.
+/// The promotiontree promotes the whole signal to a slot. 
+/// The drive inserted for that slot then covers the whole signal, including bits other 
+/// processes drive, which creates conflicting drivers.
+///
+/// Only projections whose input is defined outside the region are merged, and only if `hoistSlot` can 
+/// move the kept one out of the region. The result is a single op in front of the region's parent op.
+///
+/// This runs for every region before any region is promoted: the promotion tree built for one region also sees projections
+/// used by other regions, so duplicates left in a later region would still widen an earlier one.
+void Promoter::mergeDuplicateProjections() {
+  auto isInRegion = [&](Value value) {
+    return region.isAncestor(value.getParentRegion());
+  };
+
+  SmallSetVector<Operation *, 16> worklist;
+  for (auto &block : region)
+    for (auto &op : block)
+      if (isProjection(&op))
+        worklist.insert(&op);
+
+  while (!worklist.empty()) {
+    auto *kept = worklist.pop_back_val();
+    auto input = kept->getOperand(0);
+    if (isInRegion(input))
+      continue;
+
+    // Only projections of the same input can be equivalent.
+    SmallSetVector<Operation *, 4> duplicates;
+    for (auto *other : input.getUsers())
+      if (other != kept && other->getParentRegion() == &region &&
+          isProjection(other) &&
+          OperationEquivalence::isEquivalentTo(
+              kept, other, OperationEquivalence::Flags::IgnoreLocations))
+        duplicates.insert(other);
+
+    if (duplicates.empty())
+      continue;
+
+    hoistSlot(kept);
+    if (region.isAncestor(kept->getParentRegion()))
+      continue;
+
+    for (auto *other : duplicates) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "- Merging " << *other << " into " << *kept << "\n");
+      other->getResult(0).replaceAllUsesWith(kept->getResult(0));
+      worklist.remove(other);
+      other->erase();
+    }
+
+    for (auto *user : kept->getResult(0).getUsers())
+      if (user->getParentRegion() == &region && isProjection(user))
+        worklist.insert(user);
+  }
 }
 
 /// Identify any promotable slots probed or driven under the current region.
@@ -1390,6 +1472,7 @@ void Promoter::constructLattice() {
           continue;
         if (resolveSlot(signal) != currentSlot)
           continue;
+        recordDrivenRange(signal);
         auto condition = DriveCondition::always();
         if (auto enable = driveOp.getEnable())
           condition = DriveCondition::conditional(enable);
@@ -1982,16 +2065,120 @@ void Promoter::insertDrives(BlockExit *node) {
     auto enable = reachingDef->condition.isConditional()
                       ? reachingDef->getConditionOrPlaceholder()
                       : Value{};
-    if (delayed)
-      DriveOp::create(builder, currentSlot.getLoc(), currentSlot, value,
-                      getDeltaTime(), enable);
-    else
-      AssignOp::create(builder, currentSlot.getLoc(), currentSlot, value,
-                       enable);
+    auto emit = [&](Value target, Value targetValue) {
+      if (delayed)
+        DriveOp::create(builder, currentSlot.getLoc(), target, targetValue,
+                        getDeltaTime(), enable);
+      else
+        AssignOp::create(builder, currentSlot.getLoc(), target, targetValue,
+                         enable);
+    };
+    if (writeBackRanges.empty()) {
+      emit(currentSlot, value);
+      return;
+    }
+    // Only drive the bits this region writes. Driving the rest of the slot
+    // with its old value would conflict with other drivers of those bits.
+    for (auto [lowBit, width] : writeBackRanges) {
+      auto target = getWriteBackProjection(lowBit, width);
+      auto index = cast<SigExtractOp>(target.getDefiningOp()).getLowBit();
+      emit(target, comb::createDynamicExtract(builder, currentSlot.getLoc(),
+                                              value, index, width));
+    }
   };
 
   insertDriveForSlot(/*delayed=*/false);
   insertDriveForSlot(/*delayed=*/true);
+}
+
+/// Record which bits of `currentSlot` a drive through `signal` may write. A
+/// drive that is not a static bit range of an integer slot may write any bit.
+void Promoter::recordDrivenRange(Value signal) {
+  if (drivesWholeSlot)
+    return;
+  drivesWholeSlot = true;
+  auto slotType = dyn_cast<IntegerType>(getStoredType(currentSlot));
+  if (!slotType || signal == currentSlot){
+    return;
+  }
+  auto projections = getProjections(signal, currentSlot);
+  auto outer = dyn_cast<SigExtractOp>(projections.back().op);
+  APInt lowBit;
+  if (!outer || !matchPattern(outer.getLowBit(), m_ConstantInt(&lowBit))){
+    return;
+  }
+  uint64_t low = lowBit.getZExtValue();
+  unsigned width =
+      cast<RefType>(outer.getType()).getNestedType().getIntOrFloatBitWidth();
+  if (low + width > slotType.getWidth()) {
+    return;
+  }
+  drivenRanges.push_back({static_cast<unsigned>(low), width});
+  drivesWholeSlot = false;
+}
+
+/// Merge the recorded ranges into the disjoint ranges to drive at block exits.
+/// Leaves `writeBackRanges` empty, aka the whole slot, if any drive may write any bit, if the ranges
+/// cover the whole slot, or if nothing outside this region drives the signal, so that no other driver can conflict.
+void Promoter::computeWriteBackRanges() {
+  writeBackRanges.clear();
+  auto slotType = dyn_cast<IntegerType>(getStoredType(currentSlot));
+  if (drivesWholeSlot || drivenRanges.empty() || !slotType ||
+      region.isAncestor(currentSlot.getParentRegion()) ||
+      !hasDriverOutsideRegion())
+    return;
+  llvm::sort(drivenRanges);
+  SmallVector<std::pair<unsigned, unsigned>> merged; // (begin, end)
+  for (auto [low, width] : drivenRanges) {
+    unsigned end = low + width;
+    if (!merged.empty() && low <= merged.back().second)
+      merged.back().second = std::max(merged.back().second, end);
+    else
+      merged.push_back({low, end});
+  }
+  if (merged.size() == 1 && merged[0].first == 0 &&
+      merged[0].second == slotType.getWidth())
+    return;
+  for (auto [begin, end] : merged)
+    writeBackRanges.push_back({begin, end - begin});
+}
+
+/// Check whether anything outside this region drives the signal that
+/// `currentSlot` belongs to, directly or through projections.
+bool Promoter::hasDriverOutsideRegion() {
+  auto *root = getRootSignal(currentSlot);
+  if (!root)
+    return true;
+  SmallVector<Value> worklist = {root->getResult(0)};
+  while (!worklist.empty()) {
+    auto value = worklist.pop_back_val();
+    for (auto *user : value.getUsers()) {
+      if (isProjection(user)) {
+        worklist.push_back(user->getResult(0));
+        continue;
+      }
+      if (isa<DriveLikeOp>(user) && !region.isAncestor(user->getParentRegion()))
+        return true;
+    }
+  }
+  return false;
+}
+
+/// Get a projection of `currentSlot` covering `width` bits starting at
+/// `lowBit`, created once per slot in front of the region's parent op.
+Value Promoter::getWriteBackProjection(unsigned lowBit, unsigned width) {
+  auto &projection = writeBackProjections[{lowBit, width}];
+  if (projection)
+    return projection;
+  OpBuilder builder(region.getParentOp());
+  auto loc = currentSlot.getLoc();
+  auto slotWidth = cast<IntegerType>(getStoredType(currentSlot)).getWidth();
+  auto indexType = builder.getIntegerType(llvm::Log2_64_Ceil(slotWidth));
+  Value index = hw::ConstantOp::create(builder, loc, indexType, lowBit);
+  projection = SigExtractOp::create(builder, loc,
+                                    RefType::get(builder.getIntegerType(width)),
+                                    currentSlot, index);
+  return projection;
 }
 
 /// Remove drives to the current slot. These have been replaced with new
@@ -2333,6 +2520,10 @@ void Mem2RegPass::runOnOperation() {
     }
     return WalkResult::advance();
   });
+  // Merge duplicate projections in every region first. The promotion tree for
+  // one region also sees projections used by other regions.
+  for (auto *region : regions)
+    Promoter(*region).mergeDuplicateProjections();
   for (auto *region : regions)
     if (failed(Promoter(*region).promote()))
       return signalPassFailure();
