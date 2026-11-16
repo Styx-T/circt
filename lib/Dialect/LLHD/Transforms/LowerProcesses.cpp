@@ -304,26 +304,27 @@ struct LowerProcessesPass
 };
 } // namespace
 
-/// Turn a process that runs once at time zero and only has simulation side
-/// effects into an `sv.initial` block. Such processes come from `initial`
-/// blocks that check parameters and print messages: after loop unrolling they
-/// are straight-line code ending in `llhd.halt`, which nothing else lowers.
+/// Lower a single-block process that terminates without suspending to an
+/// sv.initial block. This handles initial blocks that check parameters and
+/// emit diags for sim, which may become straight-line processes after loop
+/// unrolling. Processes without observable effects are eliminated.
 static bool lowerOneShotProcess(ProcessOp processOp) {
   auto &body = processOp.getBody();
   if (!body.hasOneBlock())
     return false;
+
+
   auto &block = body.front();
   auto haltOp = dyn_cast<HaltOp>(block.getTerminator());
   if (!haltOp)
     return false;
-
-  // Only move ops that keep their meaning inside an `sv.initial`: no LLHD ops
-  // besides the halt, and side effects only from prints. Inside the import
-  // pipeline prints are still `sim` ops; they lower to `$fwrite` later.
+  // Only move straight-line operations that do not depend on LLHD process
+  // semantics. Reject nested regions to avoid moving unexamined operations.
   bool hasSideEffects = false;
   for (auto &op : block.without_terminator()) {
-    auto ns = op.getDialect() ? op.getDialect()->getNamespace() : "";
-    if (ns == "llhd")
+    auto *dialect = op.getDialect();
+    auto ns = dialect ? dialect->getNamespace() : "";
+    if (ns == "llhd" || op.getNumRegions() != 0)
       return false;
     if (isMemoryEffectFree(&op))
       continue;
@@ -331,14 +332,14 @@ static bool lowerOneShotProcess(ProcessOp processOp) {
       return false;
     hasSideEffects = true;
   }
-
-  // Used results must stay valid once the body moves away.
+  // An initial block cannot yield SSA results. Live process results
+  // must be forwarded from values defined outside the process.
   for (auto [result, yielded] :
        llvm::zip(processOp.getResults(), haltOp->getOperands()))
     if (!result.use_empty() && body.isAncestor(yielded.getParentRegion()))
       return false;
-
-  // A process with nothing to keep does nothing at all; just drop it.
+  // Preserve observable effects in an initial block. Otherwise, the process
+  // can be eliminated after forwarding its live results.
   if (hasSideEffects) {
     OpBuilder builder(processOp);
     auto initialOp =
@@ -349,19 +350,18 @@ static bool lowerOneShotProcess(ProcessOp processOp) {
   }
   for (auto [result, yielded] :
        llvm::zip(processOp.getResults(), haltOp->getOperands()))
-    result.replaceAllUsesWith(yielded);
+    if (!result.use_empty())
+      result.replaceAllUsesWith(yielded);
   processOp.erase();
   return true;
 }
 
 void LowerProcessesPass::runOnOperation() {
-  // Processes that run once and only print become `sv.initial` blocks.
-  SmallVector<ProcessOp> oneShot;
-  getOperation()->walk([&](ProcessOp op) { oneShot.push_back(op); });
-  for (auto op : oneShot)
-    lowerOneShotProcess(op);
-
   SmallVector<ProcessOp> processOps(getOperation().getOps<ProcessOp>());
+  for (auto processOp : processOps)
+    lowerOneShotProcess(processOp);
+
+  processOps = SmallVector<ProcessOp>(getOperation().getOps<ProcessOp>());
   for (auto processOp : processOps)
     Lowering(processOp).lower();
 }
