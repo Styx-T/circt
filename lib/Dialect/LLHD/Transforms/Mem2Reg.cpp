@@ -1110,38 +1110,46 @@ void Promoter::mergeDuplicateProjections() {
   auto isInRegion = [&](Value value) {
     return region.isAncestor(value.getParentRegion());
   };
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    SmallVector<Operation *> candidates;
-    for (auto &block : region)
-      for (auto &op : block)
-        if (isProjection(&op) && !isInRegion(op.getOperand(0)))
-          candidates.push_back(&op);
 
-    for (unsigned i = 0; i < candidates.size(); ++i) {
-      auto *kept = candidates[i];
-      if (!kept)
-        continue;
-      for (unsigned j = i + 1; j < candidates.size(); ++j) {
-        auto *other = candidates[j];
-        if (!other ||
-            !OperationEquivalence::isEquivalentTo(
-                kept, other, OperationEquivalence::Flags::IgnoreLocations))
-          continue;
-        if (region.isAncestor(kept->getParentRegion())) {
-          hoistSlot(kept);
-          if (region.isAncestor(kept->getParentRegion()))
-            break;
-        }
-        LLVM_DEBUG(llvm::dbgs()
-                   << "- Merging " << *other << " into " << *kept << "\n");
-        other->getResult(0).replaceAllUsesWith(kept->getResult(0));
-        other->erase();
-        candidates[j] = nullptr;
-        changed = true;
-      }
+  SmallSetVector<Operation *, 16> worklist;
+  for (auto &block : region)
+    for (auto &op : block)
+      if (isProjection(&op))
+        worklist.insert(&op);
+
+  while (!worklist.empty()) {
+    auto *kept = worklist.pop_back_val();
+    auto input = kept->getOperand(0);
+    if (isInRegion(input))
+      continue;
+
+    // Only projections of the same input can be equivalent.
+    SmallSetVector<Operation *, 4> duplicates;
+    for (auto *other : input.getUsers())
+      if (other != kept && other->getParentRegion() == &region &&
+          isProjection(other) &&
+          OperationEquivalence::isEquivalentTo(
+              kept, other, OperationEquivalence::Flags::IgnoreLocations))
+        duplicates.insert(other);
+
+    if (duplicates.empty())
+      continue;
+
+    hoistSlot(kept);
+    if (region.isAncestor(kept->getParentRegion()))
+      continue;
+
+    for (auto *other : duplicates) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "- Merging " << *other << " into " << *kept << "\n");
+      other->getResult(0).replaceAllUsesWith(kept->getResult(0));
+      worklist.remove(other);
+      other->erase();
     }
+
+    for (auto *user : kept->getResult(0).getUsers())
+      if (user->getParentRegion() == &region && isProjection(user))
+        worklist.insert(user);
   }
 }
 
@@ -2088,26 +2096,25 @@ void Promoter::insertDrives(BlockExit *node) {
 void Promoter::recordDrivenRange(Value signal) {
   if (drivesWholeSlot)
     return;
+  drivesWholeSlot = true;
   auto slotType = dyn_cast<IntegerType>(getStoredType(currentSlot));
-  if (!slotType || signal == currentSlot) {
-    drivesWholeSlot = true;
+  if (!slotType || signal == currentSlot){
     return;
   }
   auto projections = getProjections(signal, currentSlot);
   auto outer = dyn_cast<SigExtractOp>(projections.back().op);
   APInt lowBit;
-  if (!outer || !matchPattern(outer.getLowBit(), m_ConstantInt(&lowBit))) {
-    drivesWholeSlot = true;
+  if (!outer || !matchPattern(outer.getLowBit(), m_ConstantInt(&lowBit))){
     return;
   }
   uint64_t low = lowBit.getZExtValue();
   unsigned width =
       cast<RefType>(outer.getType()).getNestedType().getIntOrFloatBitWidth();
   if (low + width > slotType.getWidth()) {
-    drivesWholeSlot = true;
     return;
   }
   drivenRanges.push_back({static_cast<unsigned>(low), width});
+  drivesWholeSlot = false;
 }
 
 /// Merge the recorded ranges into the disjoint ranges to drive at block exits.
