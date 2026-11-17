@@ -1187,6 +1187,44 @@ circuit ListContainsMismatchedTypes:
 ;// -----
 FIRRTL version 7.0.0
 
+circuit ListContainsClassAnyRef:
+  class Foo:
+    skip
+
+  public module ListContainsClassAnyRef:
+    input values : List<Inst<Foo>>
+    input value : AnyRef
+    ; expected-error @below {{list_contains element type '!firrtl.anyref' does not match list element type '!firrtl.class<@Foo()>'}}
+    propassert list_contains(values, value), "type mismatch"
+
+;// -----
+FIRRTL version 7.0.0
+
+circuit ListContainsAnyRefInteger:
+  public module ListContainsAnyRefInteger:
+    input values : List<AnyRef>
+    input value : Integer
+    ; expected-error @below {{list_contains element type '!firrtl.integer' does not match list element type '!firrtl.anyref'}}
+    propassert list_contains(values, value), "type mismatch"
+
+;// -----
+FIRRTL version 7.0.0
+
+circuit ListContainsDifferentClasses:
+  class Foo:
+    skip
+  class Bar:
+    skip
+
+  public module ListContainsDifferentClasses:
+    input values : List<Inst<Foo>>
+    input value : Inst<Bar>
+    ; expected-error @below {{list_contains element type '!firrtl.class<@Bar()>' does not match list element type '!firrtl.class<@Foo()>'}}
+    propassert list_contains(values, value), "type mismatch"
+
+;// -----
+FIRRTL version 7.0.0
+
 circuit ListContainsUnsupportedType:
   public module ListContainsUnsupportedType:
     input values : List<Double>
@@ -2042,6 +2080,16 @@ circuit Domains:
   public module Domains:
     ; expected-error @below {{domains are a FIRRTL 7.0.0+ feature}}
     input a: UInt<1> domains [A]
+
+;// -----
+
+FIRRTL version 7.0.0
+circuit DomainDuplicateFieldName:
+  domain D:
+    f: Integer
+    ; expected-error @below {{duplicate field name in domain: f}}
+    f: String
+  public module DomainDuplicateFieldName:
 
 ;// -----
 

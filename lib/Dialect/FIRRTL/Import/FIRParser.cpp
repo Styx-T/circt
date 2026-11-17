@@ -3008,12 +3008,15 @@ ParseResult FIRStmtParser::parseListContainsExp(Value &result) {
     return emitError(loc, "first operand of list_contains must be a List");
 
   auto elementType = listType.getElementType();
+  locationProcessor.setLoc(loc);
+  element = emitImplicitAnyRefCast(element, elementType);
   if (element.getType() != elementType)
     return emitError(loc, "list_contains element type ")
            << element.getType() << " does not match list element type "
            << elementType;
 
-  if (!isa<StringType, FIntegerType, BoolType>(elementType))
+  if (!isa<StringType, FIntegerType, BoolType, ClassType, AnyRefType>(
+          elementType))
     return emitError(loc, "list_contains does not support elements of type ")
            << elementType;
 
@@ -6135,17 +6138,24 @@ ParseResult FIRCircuitParser::parseDomain(CircuitOp circuit, unsigned indent) {
     return failure();
 
   SmallVector<Attribute> fields;
+  SmallPtrSet<StringAttr, 4> nameSet;
   while (true) {
     auto nextIndent = getIndentation();
     if (!nextIndent || *nextIndent <= indent)
       break;
 
+    auto loc = getToken().getLoc();
     StringAttr fieldName;
     PropertyType type;
     if (parseId(fieldName, "field name") ||
         parseToken(FIRToken::colon, "expected ':' after field name") ||
         parsePropertyType(type, "field type") || info.parseOptionalInfo())
       return failure();
+
+    // Verify that the names of each field are unique.
+    if (!nameSet.insert(fieldName).second)
+      return emitError(loc, "duplicate field name in domain: " +
+                                fieldName.getValue());
 
     fields.push_back(
         DomainFieldAttr::get(circuit.getContext(), fieldName, type));

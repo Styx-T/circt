@@ -188,7 +188,7 @@ om.class @ListContainsInferredTypeMismatch(%list: !om.list<!om.string>) {
 // -----
 
 om.class @ListContainsUnsupportedType(%list: !om.list<i32>, %element: i32) {
-  // expected-error @+1 {{operand #1 must be A type that represents a string. or A type that represents an arbitrary width integer. or 1-bit signless integer, but got 'i32'}}
+  // expected-error @+1 {{operand #1 must be A type that represents a string. or A type that represents an arbitrary width integer. or 1-bit signless integer or A type that represents a reference to a Class. or A type that represents any valid OM type., but got 'i32'}}
   %0 = om.list_contains %list, %element : !om.list<i32>
   om.class.fields
 }
@@ -250,5 +250,31 @@ om.class @A(%arg: i1) -> (a: i1) {
 om.class@A() -> () {
   // expected-error @+1 {{'om.unknown' op refers to non-existant class ("NonExistant")}}
   %0 = om.unknown : !om.class.type<@NonExistant>
+  om.class.fields
+}
+
+// -----
+
+om.class @RegistryInsertMismatch(%items: !om.registry<!om.integer>, %value: !om.string) {
+  // expected-error @+1 {{element type must match the registry element type}}
+  "om.registry_insert"(%items, %value) : (!om.registry<!om.integer>, !om.string) -> ()
+  om.class.fields
+}
+
+// -----
+
+// Even uniformly typed operands must match the registry element type.
+om.class @RegistryInitialWrongType(%string: !om.string) {
+  // expected-error @+1 {{element types must match the registry element type}}
+  %items = "om.registry_create"(%string, %string) : (!om.string, !om.string) -> !om.registry<!om.integer>
+  om.class.fields
+}
+
+// -----
+
+// Initial elements must all have the same type.
+om.class @RegistryInitialMismatch(%integer: !om.integer, %string: !om.string) {
+  // expected-error @+1 {{requires all operands to have the same type}}
+  %items = "om.registry_create"(%integer, %string) : (!om.integer, !om.string) -> !om.registry<!om.integer>
   om.class.fields
 }
