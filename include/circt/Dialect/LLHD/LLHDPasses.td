@@ -52,6 +52,18 @@ def Sig2RegPass : Pass<"llhd-sig2reg", "hw::HWModuleOp"> {
   ];
 }
 
+def ProveBooleanEnablesPass
+    : Pass<"llhd-prove-boolean-enables", "circt::hw::HWModuleOp"> {
+  let summary = "Prove small LLHD drive enables constant";
+  let description = [{
+    Exhaustively evaluate bounded two-state Boolean expression cones
+    controlling llhd.drv and llhd.assign operations.
+
+    Constant-true enables are removed. Constant-false operations are
+    erased. Unsupported or oversized cones are left unchanged.
+  }];
+}
+
 def Mem2RegPass : Pass<"llhd-mem2reg"> {
   let summary = "Promotes memory and signal slots into values.";
   let dependentDialects = [
