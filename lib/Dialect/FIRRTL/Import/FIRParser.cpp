@@ -2062,6 +2062,7 @@ private:
   ParseResult parseCatExp(Value &result);
   ParseResult parseStringConcatExp(Value &result);
   ParseResult parsePropEqExp(Value &result);
+  ParseResult parseListLengthExp(Value &result);
   ParseResult parseListContainsExp(Value &result);
   ParseResult parseUnsafeDomainCast(Value &result);
   ParseResult parseUnknownProperty(Value &result);
@@ -2468,6 +2469,12 @@ ParseResult FIRStmtParser::parseExpImpl(Value &result, const Twine &message,
   case FIRToken::lp_prop_eq:
     if (requireFeature({6, 0, 0}, "property equality") ||
         parsePropEqExp(result))
+      return failure();
+    break;
+
+  case FIRToken::lp_list_length:
+    if (requireFeature(nextFIRVersion, "list length") ||
+        parseListLengthExp(result))
       return failure();
     break;
 
@@ -2986,6 +2993,26 @@ ParseResult FIRStmtParser::parsePropEqExp(Value &result) {
 
   locationProcessor.setLoc(loc);
   result = PropEqOp::create(builder, lhs, rhs);
+  return success();
+}
+
+/// list-length-exp ::= 'list_length' '(' exp ')'
+// NOLINTNEXTLINE(misc-no-recursion)
+ParseResult FIRStmtParser::parseListLengthExp(Value &result) {
+  consumeToken(FIRToken::lp_list_length);
+
+  auto loc = getToken().getLoc();
+  Value list;
+  locationProcessor.setLoc(loc);
+  if (parseExp(list, "expected list expression in list_length expression") ||
+      parseToken(FIRToken::r_paren, "expected ')'"))
+    return failure();
+
+  if (!isa<ListType>(list.getType()))
+    return emitError(loc, "operand of list_length must be a List");
+
+  locationProcessor.setLoc(loc);
+  result = ListLengthOp::create(builder, list);
   return success();
 }
 
@@ -6126,12 +6153,13 @@ ParseResult FIRCircuitParser::parseClass(CircuitOp circuit, unsigned indent) {
   return skipToModuleEnd(indent);
 }
 
-/// domain ::= 'domain' id ':' info?
+/// domain ::= 'domain' id ':' info? (INDENT domain-field+ DEDENT)?
+/// domain-field ::= id ':' property-type info? NEWLINE
 ParseResult FIRCircuitParser::parseDomain(CircuitOp circuit, unsigned indent) {
+  LocWithInfo info(getToken().getLoc(), this);
   consumeToken(FIRToken::kw_domain);
 
   StringAttr name;
-  LocWithInfo info(getToken().getLoc(), this);
   if (parseId(name, "domain name") ||
       parseToken(FIRToken::colon, "expected ':' after domain definition") ||
       info.parseOptionalInfo())
@@ -6522,10 +6550,9 @@ ParseResult FIRCircuitParser::parseTypeDecl() {
 // Parse an option group declaration.
 ParseResult FIRCircuitParser::parseOptionDecl(CircuitOp circuit) {
   StringRef id;
-  consumeToken();
-  auto loc = getToken().getLoc();
-
   LocWithInfo info(getToken().getLoc(), this);
+  consumeToken();
+
   if (parseId(id, "expected an option group name") ||
       parseToken(FIRToken::colon,
                  "expected ':' after option group definition") ||
@@ -6549,7 +6576,7 @@ ParseResult FIRCircuitParser::parseOptionDecl(CircuitOp circuit) {
       return failure();
 
     if (!cases.insert(id).second)
-      return emitError(loc)
+      return emitError(caseInfo.getFIRLoc())
              << "duplicate option case definition '" << id << "'";
 
     OptionCaseOp::create(builder, caseInfo.getLoc(), id);

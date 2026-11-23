@@ -107,6 +107,8 @@ struct SetStorage;
 struct VirtualRegisterStorage;
 struct UniqueLabelStorage;
 struct TupleStorage;
+struct StructStorage;
+struct VariantStorage;
 struct MemoryStorage;
 struct MemoryBlockStorage;
 struct SymbolicComputationWithIdentityStorage;
@@ -117,15 +119,14 @@ struct MutStorage;
 struct ContinuationStorage;
 
 /// The abstract base class for elaborated values.
-using ElaboratorValue =
-    std::variant<TypedAttr, BagStorage *, bool, size_t, SequenceStorage *,
-                 RandomizedSequenceStorage *, InterleavedSequenceStorage *,
-                 SetStorage *, VirtualRegisterStorage *, UniqueLabelStorage *,
-                 ArrayStorage *, TupleStorage *, MemoryStorage *,
-                 MemoryBlockStorage *, SymbolicComputationWithIdentityStorage *,
-                 SymbolicComputationWithIdentityValue *,
-                 SymbolicComputationStorage *, OpaqueExternalStorage *,
-                 MutStorage *, ContinuationStorage *>;
+using ElaboratorValue = std::variant<
+    TypedAttr, BagStorage *, bool, size_t, SequenceStorage *,
+    RandomizedSequenceStorage *, InterleavedSequenceStorage *, SetStorage *,
+    VirtualRegisterStorage *, UniqueLabelStorage *, ArrayStorage *,
+    TupleStorage *, StructStorage *, VariantStorage *, MemoryStorage *,
+    MemoryBlockStorage *, SymbolicComputationWithIdentityStorage *,
+    SymbolicComputationWithIdentityValue *, SymbolicComputationStorage *,
+    OpaqueExternalStorage *, MutStorage *, ContinuationStorage *>;
 using LexicalEnvironment = DenseMap<Value, ElaboratorValue>;
 
 // NOLINTNEXTLINE(readability-identifier-naming)
@@ -362,6 +363,43 @@ struct TupleStorage : CachableStorage {
   const SmallVector<ElaboratorValue> values;
 };
 
+/// Storage object for nominal struct values. The type is part of the identity
+/// because two struct families with equal fields are not interchangeable.
+struct StructStorage : CachableStorage {
+  StructStorage(StructType type, SmallVector<ElaboratorValue> &&fields)
+      : hashcode(llvm::hash_combine(
+            type, llvm::hash_combine_range(fields.begin(), fields.end()))),
+        type(type), fields(std::move(fields)) {}
+
+  bool isEqual(const StructStorage *other) const {
+    return hashcode == other->hashcode && type == other->type &&
+           fields == other->fields;
+  }
+
+  const unsigned hashcode;
+  const StructType type;
+  const SmallVector<ElaboratorValue> fields;
+};
+
+/// Storage object for nominal variant values. The constructor label and payload
+/// define runtime identity within the nominal type.
+struct VariantStorage : CachableStorage {
+  VariantStorage(VariantType type, StringAttr constructor,
+                 ElaboratorValue payload)
+      : hashcode(llvm::hash_combine(type, constructor, payload)), type(type),
+        constructor(constructor), payload(payload) {}
+
+  bool isEqual(const VariantStorage *other) const {
+    return hashcode == other->hashcode && type == other->type &&
+           constructor == other->constructor && payload == other->payload;
+  }
+
+  const unsigned hashcode;
+  const VariantType type;
+  const StringAttr constructor;
+  const ElaboratorValue payload;
+};
+
 struct SymbolicComputationStorage {
   SymbolicComputationStorage(const DenseMap<Value, ElaboratorValue> &state,
                              Operation *op)
@@ -573,6 +611,10 @@ struct ScfIfFrame {
                      ArrayRef<ElaboratorValue> yieldedValues);
 };
 
+struct VariantMatchFrame {
+  VariantMatchOp op;
+};
+
 struct ScfForFrame {
   scf::ForOp op;
   size_t nextIteration = 0;
@@ -628,9 +670,9 @@ struct ResumeFrame {
 };
 
 using EvalFramePayload =
-    std::variant<BlockFrame, ScfIfFrame, ScfForFrame, RandomScopeFrame,
-                 WithHandlersFrame, HandlerClauseFrame, FunctionCallFrame,
-                 ExternalOpFrame, ResumeFrame>;
+    std::variant<BlockFrame, ScfIfFrame, VariantMatchFrame, ScfForFrame,
+                 RandomScopeFrame, WithHandlersFrame, HandlerClauseFrame,
+                 FunctionCallFrame, ExternalOpFrame, ResumeFrame>;
 
 struct EvalFrame {
   EvalFramePayload payload;
@@ -770,6 +812,10 @@ private:
       return internedInterleavedSequences;
     else if constexpr (std::is_same_v<StorageTy, TupleStorage>)
       return internedTuples;
+    else if constexpr (std::is_same_v<StorageTy, StructStorage>)
+      return internedStructs;
+    else if constexpr (std::is_same_v<StorageTy, VariantStorage>)
+      return internedVariants;
     else if constexpr (std::is_same_v<StorageTy, SymbolicComputationStorage>)
       return internedSymbolicComputationWithIdentityValues;
     else
@@ -803,6 +849,10 @@ private:
       internedInterleavedSequences;
   DenseSet<HashedStorage<TupleStorage>, StorageKeyInfo<TupleStorage>>
       internedTuples;
+  DenseSet<HashedStorage<StructStorage>, StorageKeyInfo<StructStorage>>
+      internedStructs;
+  DenseSet<HashedStorage<VariantStorage>, StorageKeyInfo<VariantStorage>>
+      internedVariants;
   DenseSet<HashedStorage<SymbolicComputationStorage>,
            StorageKeyInfo<SymbolicComputationStorage>>
       internedSymbolicComputationWithIdentityValues;
@@ -888,6 +938,18 @@ static void print(const TupleStorage *val, llvm::raw_ostream &os) {
   os << ")>";
 }
 
+static void print(const StructStorage *val, llvm::raw_ostream &os) {
+  os << "<struct " << val->type << " [";
+  llvm::interleaveComma(val->fields, os,
+                        [&](const ElaboratorValue &field) { os << field; });
+  os << "]>";
+}
+
+static void print(const VariantStorage *val, llvm::raw_ostream &os) {
+  os << "<variant " << val->type << " " << val->constructor << " "
+     << val->payload << ">";
+}
+
 static void print(const MemoryStorage *val, llvm::raw_ostream &os) {
   os << "<memory {" << ElaboratorValue(val->memoryBlock)
      << ", size=" << val->size << ", alignment=" << val->alignment << "}>";
@@ -962,9 +1024,11 @@ public:
       : internalizer(internalizer) {}
 
   /// Convert an attribute to an ElaboratorValue.
+  // NOLINTBEGIN(misc-no-recursion): Nested attributes are converted
+  // recursively.
   FailureOr<ElaboratorValue> convert(Attribute attr) {
     return llvm::TypeSwitch<Attribute, FailureOr<ElaboratorValue>>(attr)
-        .Case<IntegerAttr, SetAttr, TupleAttr>(
+        .Case<IntegerAttr, SetAttr, TupleAttr, StructAttr, VariantAttr>(
             [&](auto attr) { return convert(attr); })
         .Case<TypedAttr>([&](auto typedAttr) -> FailureOr<ElaboratorValue> {
           return ElaboratorValue(typedAttr);
@@ -1010,6 +1074,31 @@ private:
     storage->attrCache = tupleAttr;
     return ElaboratorValue(storage);
   }
+
+  FailureOr<ElaboratorValue> convert(StructAttr structAttr) {
+    SmallVector<ElaboratorValue> fields;
+    for (auto field : structAttr.getFields()) {
+      auto converted = convert(field);
+      if (failed(converted))
+        return failure();
+      fields.push_back(*converted);
+    }
+    auto *storage = internalizer.internalize<StructStorage>(
+        structAttr.getType(), std::move(fields));
+    storage->attrCache = structAttr;
+    return ElaboratorValue(storage);
+  }
+
+  FailureOr<ElaboratorValue> convert(VariantAttr variantAttr) {
+    auto payload = convert(variantAttr.getPayload());
+    if (failed(payload))
+      return failure();
+    auto *storage = internalizer.internalize<VariantStorage>(
+        variantAttr.getType(), variantAttr.getConstructor(), *payload);
+    storage->attrCache = variantAttr;
+    return ElaboratorValue(storage);
+  }
+  // NOLINTEND(misc-no-recursion)
 
   Internalizer &internalizer;
 };
@@ -1075,6 +1164,24 @@ private:
       elements.push_back(typedAttr);
     }
     return TupleAttr::get(context, elements);
+  }
+
+  TypedAttr visit(StructStorage *val) {
+    SmallVector<TypedAttr> fields;
+    for (auto field : val->fields) {
+      auto converted = convert(field);
+      if (!converted)
+        return {};
+      fields.push_back(converted);
+    }
+    return StructAttr::get(context, val->type, fields);
+  }
+
+  TypedAttr visit(VariantStorage *val) {
+    TypedAttr payload = convert(val->payload);
+    if (!payload)
+      return {};
+    return VariantAttr::get(context, val->type, val->constructor, payload);
   }
 
   // Default implementation for storage types that cannot be converted to
@@ -1527,6 +1634,33 @@ private:
     Value res = TupleCreateOp::create(builder, loc, materialized);
     materializedValues[val] = res;
     return res;
+  }
+
+  Value visit(StructStorage *val, Location loc,
+              function_ref<InFlightDiagnostic()> emitError) {
+    SmallVector<Value> fields;
+    fields.reserve(val->fields.size());
+    for (auto field : val->fields) {
+      Value value = materialize(field, loc, emitError);
+      if (!value)
+        return {};
+      fields.push_back(value);
+    }
+    Value res = StructCreateOp::create(builder, loc, val->type, fields);
+    materializedValues[val] = res;
+    return res;
+  }
+
+  Value visit(VariantStorage *val, Location loc,
+              function_ref<InFlightDiagnostic()> emitError) {
+    Value payload = materialize(val->payload, loc, emitError);
+    if (!payload)
+      return {};
+    Value result =
+        VariantCreateOp::create(builder, loc, val->type, ValueRange{payload},
+                                val->constructor.getValue());
+    materializedValues[val] = result;
+    return result;
   }
 
   Value visit(MutStorage *val, Location loc,
@@ -2250,6 +2384,12 @@ public:
     } else if (auto *tuple = std::get_if<TupleStorage *>(&value)) {
       if (visited.insert(*tuple).second)
         collectRange((*tuple)->values);
+    } else if (auto *structure = std::get_if<StructStorage *>(&value)) {
+      if (visited.insert(*structure).second)
+        collectRange((*structure)->fields);
+    } else if (auto *variant = std::get_if<VariantStorage *>(&value)) {
+      if (visited.insert(*variant).second)
+        collectContinuations((*variant)->payload, result, visited);
     } else if (auto *symbolic =
                    std::get_if<SymbolicComputationStorage *>(&value)) {
       if (visited.insert(*symbolic).second)
@@ -2334,6 +2474,44 @@ public:
   FailureOr<DeletionKind> visitOp(TupleExtractOp op) {
     auto *tuple = get<TupleStorage *>(op.getTuple());
     state[op.getResult()] = tuple->values[op.getIndex().getZExtValue()];
+    return DeletionKind::Delete;
+  }
+
+  FailureOr<DeletionKind> visitOp(StructCreateOp op) {
+    SmallVector<ElaboratorValue> fields;
+    fields.reserve(op.getFields().size());
+    for (Value field : op.getFields())
+      fields.push_back(state.at(field));
+    state[op.getResult()] = sharedState.internalizer.internalize<StructStorage>(
+        op.getResult().getType(), std::move(fields));
+    return DeletionKind::Delete;
+  }
+
+  FailureOr<DeletionKind> visitOp(StructExtractOp op) {
+    auto *structure = get<StructStorage *>(op.getValue());
+    auto declaration = SymbolTable::lookupNearestSymbolFrom<StructDeclOp>(
+        op, structure->type.getDeclaration());
+    if (!declaration)
+      return op.emitOpError("references an unknown struct declaration");
+    auto index = declaration.getFieldIndex(op.getFieldNameAttr().getValue());
+    if (!index)
+      return op.emitOpError() << "field '" << op.getFieldNameAttr().getValue()
+                              << "' is not declared by " << structure->type;
+    state[op.getResult()] = structure->fields[*index];
+    return DeletionKind::Delete;
+  }
+
+  FailureOr<DeletionKind> visitOp(VariantCreateOp op) {
+    auto type = op.getResult().getType();
+    ElaboratorValue payload;
+    if (op.getPayload().empty())
+      payload = sharedState.internalizer.internalize<TupleStorage>(
+          SmallVector<ElaboratorValue>{});
+    else
+      payload = state.at(op.getPayload().front());
+    state[op.getResult()] =
+        sharedState.internalizer.internalize<VariantStorage>(
+            type, op.getConstructorAttr(), payload);
     return DeletionKind::Delete;
   }
 
@@ -2641,8 +2819,9 @@ public:
 
   bool supportsSymbolicValuesNonGenerically(Operation *op) {
     return isa<SubstituteSequenceOp, ArrayCreateOp, ArrayInjectOp,
-               TupleCreateOp, MutCreateOp, MutReadOp, MutWriteOp,
-               arith::SelectOp, func::CallOp, func::CallIndirectOp>(op);
+               TupleCreateOp, StructCreateOp, VariantCreateOp, VariantMatchOp,
+               MutCreateOp, MutReadOp, MutWriteOp, arith::SelectOp,
+               func::CallOp, func::CallIndirectOp>(op);
   }
 
   FailureOr<DeletionKind> dispatchOpVisitor(Operation *op) {
@@ -2975,6 +3154,17 @@ public:
       return success();
     }
 
+    if (auto *frame = workStack.back()->getIf<VariantMatchFrame>()) {
+      auto *parent = workStack[workStack.size() - 2]->getIf<BlockFrame>();
+      if (!parent)
+        return frame->op->emitOpError("rtg.match lost its parent block frame");
+      for (auto [result, value] :
+           llvm::zip(frame->op.getResults(), yieldedValues))
+        parent->environment[result] = value;
+      workStack.pop_back();
+      return success();
+    }
+
     if (auto *frame = workStack.back()->getIf<ScfForFrame>()) {
       if (failed(frame->step(*this, yieldedValues)))
         return failure();
@@ -3171,6 +3361,27 @@ public:
         continue;
       }
 
+      if (auto matchOp = dyn_cast<VariantMatchOp>(op)) {
+        auto selectorValue = state.at(matchOp.getValue());
+        auto *variant = std::get_if<VariantStorage *>(&selectorValue);
+        if (!variant)
+          return matchOp.emitOpError(
+              "cannot evaluate match with a non-concrete variant selector");
+
+        auto caseIndex =
+            matchOp.getCaseIndex((*variant)->constructor.getValue());
+        Region &region = matchOp.getCaseRegions()[*caseIndex];
+        SmallVector<ElaboratorValue> regionArguments{(*variant)->payload};
+
+        workStack.back()->get<BlockFrame>().environment = state;
+        workStack.emplace_back(
+            std::make_unique<EvalFrame>(VariantMatchFrame{matchOp}));
+        if (failed(pushRegionFrame(region, regionArguments,
+                                   /*keepTerminator=*/false, replay, state)))
+          return failure();
+        continue;
+      }
+
       if (auto forOp = dyn_cast<scf::ForOp>(op)) {
         if (!(std::holds_alternative<size_t>(state.at(forOp.getLowerBound())) &&
               std::holds_alternative<size_t>(state.at(forOp.getStep())) &&
@@ -3321,6 +3532,7 @@ private:
   EvalFrameStack workStack;
 
   friend struct ScfIfFrame;
+  friend struct VariantMatchFrame;
   friend struct ScfForFrame;
 };
 

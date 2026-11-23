@@ -106,6 +106,72 @@ rtg.test @test(a = %a: i32) target @target {
 
 // -----
 
+rtg.struct.decl @Point { x: index }
+%value = rtg.constant #rtg.struct<1 : index> : !rtg.struct<@Point>
+// expected-error @below {{field 'missing' is not declared by '!rtg.struct<@Point>'}}
+%field = rtg.struct_extract %value[missing] : !rtg.struct<@Point> -> index
+
+// -----
+
+// expected-error @below {{duplicate field label 'x'}}
+rtg.struct.decl @Duplicate { x: index, x: i1 }
+
+// -----
+
+// The custom syntax cannot express mismatched name/type counts, but malformed
+// generic IR must still be rejected by the verifier.
+// expected-error @below {{field name and type counts must match}}
+"rtg.struct.decl"() <{sym_name = "Malformed", field_names = ["x", "y"], field_types = [index]}> : () -> ()
+
+// -----
+
+rtg.struct.decl @Point { x: index, y: i1 }
+func.func @bad_struct_create(%x: i1, %y: index) {
+  // expected-error @below {{field 0 has type 'i1', expected 'index'}}
+  %value = rtg.struct_create %x, %y : (i1, index) -> !rtg.struct<@Point>
+  func.return
+}
+
+// -----
+
+rtg.struct.decl @Point { x: index, y: i1 }
+func.func @bad_struct_field_count(%x: index) {
+  // expected-error @below {{struct expects 2 fields, got 1}}
+  %value = rtg.struct_create %x : (index) -> !rtg.struct<@Point>
+  func.return
+}
+
+// -----
+
+rtg.struct.decl @Point { x: index, y: i1 }
+func.func @bad_struct_extract(%value: !rtg.struct<@Point>) -> i1 {
+  // expected-error @below {{result type 'i1' does not match field 'x' type 'index'}}
+  %field = rtg.struct_extract %value[x] : !rtg.struct<@Point> -> i1
+  func.return %field : i1
+}
+
+// -----
+
+rtg.struct.decl @Point { x: index, y: i1 }
+// expected-error @below {{field 0 has type 'i1', expected 'index'}}
+%value = rtg.constant #rtg.struct<1 : i1, 2 : index> : !rtg.struct<@Point>
+
+// -----
+
+rtg.struct.decl @Point { x: index }
+func.func @unknown_struct() {
+  // expected-error @below {{references unknown struct declaration @Missing}}
+  %value = rtg.struct_create -> !rtg.struct<@Missing>
+  func.return
+}
+
+// -----
+
+// expected-error @below {{references unknown struct declaration @Missing}}
+rtg.struct.decl @NestedUnknown { x: !rtg.array<!rtg.struct<@Missing>> }
+
+// -----
+
 rtg.target @target : !rtg.dict<a: index> {
   %0 = index.constant 0
   rtg.yield %0 : index
@@ -343,4 +409,74 @@ rtg.test @setAttrExplicitTypeRequired() {
 rtg.test @stringToASCIIArrayWrongElementType(str = %str: !rtg.string) {
   // expected-error @below {{must be array of 8-bit signless integer values}}
   rtg.string_to_ascii_array %str : !rtg.array<i16>
+}
+
+// -----
+
+// expected-error @below {{duplicate constructor label 'Some'}}
+rtg.variant.decl @DuplicateLabel {
+  Some: !rtg.tuple,
+  Some: index
+}
+
+// -----
+
+// Generic assembly must still reject malformed parallel schema arrays.
+// expected-error @below {{constructor names and payload type counts must match}}
+"rtg.variant.decl"() <{
+  sym_name = "Malformed",
+  constructor_names = ["A"],
+  payload_types = []
+}> : () -> ()
+
+// -----
+
+rtg.variant.decl @Option { None: !rtg.tuple, Some: index }
+func.func @unknown_constructor(%payload: index) {
+  // expected-error @below {{constructor 'Missing' is not declared by variant type '!rtg.variant<@Option>'}}
+  %value = rtg.variant_create Missing(%payload) : (index) -> !rtg.variant<@Option>
+  func.return
+}
+
+// -----
+
+rtg.variant.decl @Option { Some: index }
+func.func @bad_variant_payload(%payload: i1) {
+  // expected-error @below {{payload has type 'i1', expected 'index'}}
+  %value = rtg.variant_create Some(%payload) : (i1) -> !rtg.variant<@Option>
+  func.return
+}
+
+// -----
+
+rtg.variant.decl @Option { Some: index }
+// expected-error @below {{constructor 'Missing' is not declared by variant type '!rtg.variant<@Option>'}}
+%value = rtg.constant #rtg.variant<Missing, 0 : index> : !rtg.variant<@Option>
+
+// -----
+
+rtg.variant.decl @Option { Some: index }
+// expected-error @below {{payload for constructor 'Some' has type 'i1', expected 'index'}}
+%value = rtg.constant #rtg.variant<Some, 0 : i1> : !rtg.variant<@Option>
+
+// -----
+
+rtg.variant.decl @Option { None: !rtg.tuple, Some: index }
+func.func @incomplete_match(%value: !rtg.variant<@Option>) {
+  // expected-error @below {{must provide exactly one case for every constructor}}
+  rtg.match %value : !rtg.variant<@Option> {
+    case Some(%payload: index) { rtg.yield }
+  }
+  func.return
+}
+
+// -----
+
+rtg.variant.decl @Option { Some: index }
+func.func @bad_match_payload(%value: !rtg.variant<@Option>) {
+  // expected-error @below {{case 'Some' payload argument has type 'i1', expected 'index'}}
+  rtg.match %value : !rtg.variant<@Option> {
+    case Some(%payload: i1) { rtg.yield }
+  }
+  func.return
 }

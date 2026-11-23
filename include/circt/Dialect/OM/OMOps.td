@@ -387,6 +387,23 @@ def ListConcatOp : OMOp<"list_concat", [Pure, SameOperandsAndResultType]> {
   let hasCanonicalizer = 1;
 }
 
+def ListLengthOp : OMOp<"list_length", [Pure]> {
+  let summary = "Get the length of a list";
+  let description = [{
+    Returns the number of elements in the list as an `!om.integer`. The list
+    element type is unrestricted.
+
+    Example:
+    ```mlir
+    %length = om.list_length %list : !om.list<!om.string>
+    ```
+  }];
+  let arguments = (ins ListType:$list);
+  let results = (outs OMIntegerType:$result);
+  let assemblyFormat = "$list attr-dict `:` type($list)";
+  let hasFolder = 1;
+}
+
 def ListContainsOp : OMOp<"list_contains", [Pure,
     TypesMatchWith<"list element type should match search element type",
                    "list", "element",
@@ -404,9 +421,7 @@ def ListContainsOp : OMOp<"list_contains", [Pure,
     %refFound = om.list_contains %refs, %ref : !om.list<!om.any>
     ```
   }];
-  let arguments = (ins ListType:$list,
-                       AnyTypeOf<[StringType, OMIntegerType, I1,
-                                  ClassType, OMAnyType]>:$element);
+  let arguments = (ins ListType:$list, PropEqualityType:$element);
   let results = (outs I1:$result);
   let assemblyFormat = "$list `,` $element attr-dict `:` type($list)";
   let hasFolder = 1;
@@ -719,10 +734,7 @@ class BinaryEqualityOpBase<string mnemonic, list<Trait> traits = []> :
       Pure,
       AllTypesMatch<["lhs", "rhs"]>
     ] # traits> {
-  let arguments = (ins AnyTypeOf<[StringType, OMIntegerType, I1,
-                                  ClassType, OMAnyType]>:$lhs,
-                       AnyTypeOf<[StringType, OMIntegerType, I1,
-                                  ClassType, OMAnyType]>:$rhs);
+  let arguments = (ins PropEqualityType:$lhs, PropEqualityType:$rhs);
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs)";
 }
 

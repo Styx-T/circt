@@ -1363,6 +1363,24 @@ def ListConcatOp : FIRRTLOp<"list.concat", [Pure, SameOperandsAndResultType]> {
   let assemblyFormat = "$subLists attr-dict `:` type($result)";
 }
 
+def ListLengthOp : FIRRTLOp<"list.length", [Pure]> {
+  let summary = "Return the number of elements in a list";
+  let description = [{
+    Returns an Integer property value equal to the number of elements in the
+    list. The element type may be any legal property type.
+
+    Example:
+    ```mlir
+    %length = firrtl.list.length %list : !firrtl.list<string>
+    ```
+  }];
+
+  let arguments = (ins ListType:$list);
+  let results = (outs FIntegerType:$result);
+
+  let assemblyFormat = "$list attr-dict `:` type($list)";
+}
+
 def ListContainsOp : FIRRTLOp<"list.contains", [Pure,
     TypesMatchWith<"list element type should match search element type",
                    "list", "element",
@@ -1387,9 +1405,7 @@ def ListContainsOp : FIRRTLOp<"list.contains", [Pure,
     ```
   }];
 
-  let arguments = (ins ListType:$list,
-                       AnyTypeOf<[StringType, BoolType, FIntegerType,
-                                  ClassType, AnyRefType]>:$element);
+  let arguments = (ins ListType:$list, PropEqualityType:$element);
   let results = (outs BoolType:$result);
 
   let assemblyFormat = "$list `,` $element attr-dict `:` type($list)";
@@ -1598,10 +1614,7 @@ def PropEqOp : FIRRTLOp<"prop.eq", [Pure, AllTypesMatch<["lhs", "rhs"]>]> {
     ```
   }];
 
-  let arguments = (ins AnyTypeOf<[StringType, BoolType, FIntegerType,
-                                 ClassType, AnyRefType]>:$lhs,
-                       AnyTypeOf<[StringType, BoolType, FIntegerType,
-                                 ClassType, AnyRefType]>:$rhs);
+  let arguments = (ins PropEqualityType:$lhs, PropEqualityType:$rhs);
   let results = (outs BoolType:$result);
 
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs)";

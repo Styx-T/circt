@@ -255,6 +255,100 @@ rtg.test @tuples(tup = %tup: !rtg.tuple) {
   rtg.tuple_create
 }
 
+// Struct declaration and round-trip coverage is kept next to its users.
+// CHECK: rtg.struct.decl @Point {
+// CHECK-NEXT:   x: index,
+// CHECK-NEXT:   y: i1
+// CHECK-NEXT: }
+rtg.struct.decl @Point { x: index, y: i1 }
+
+// CHECK-LABEL: func.func @construct
+func.func @construct(%x: index, %y: i1) -> !rtg.struct<@Point> {
+  // CHECK-NEXT: %{{.*}} = rtg.struct_create %arg0, %arg1 : (index, i1) -> !rtg.struct<@Point>
+  %value = rtg.struct_create %x, %y : (index, i1) -> !rtg.struct<@Point>
+  // CHECK-NEXT: return %0 : !rtg.struct<@Point>
+  func.return %value : !rtg.struct<@Point>
+}
+
+// CHECK-LABEL: func.func @project_constant
+func.func @project_constant() -> i1 {
+  // CHECK-NEXT: [[POINT:%.+]] = rtg.constant #rtg.struct<3 : index, true> : !rtg.struct<@Point>
+  %value = rtg.constant #rtg.struct<3 : index, 1 : i1> : !rtg.struct<@Point>
+  // CHECK-NEXT: %{{.*}} = rtg.struct_extract [[POINT]][y] : !rtg.struct<@Point> -> i1
+  %field = rtg.struct_extract %value[y] : !rtg.struct<@Point> -> i1
+  // CHECK-NEXT: return %1 : i1
+  func.return %field : i1
+}
+
+// CHECK-LABEL: func.func @construct_project
+func.func @construct_project(%x: index, %y: i1) -> index {
+  // CHECK-NEXT: %{{.*}} = rtg.struct_create %arg0, %arg1 : (index, i1) -> !rtg.struct<@Point>
+  %value = rtg.struct_create %x, %y : (index, i1) -> !rtg.struct<@Point>
+  // CHECK-NEXT: %{{.*}} = rtg.struct_extract %0[x] : !rtg.struct<@Point> -> index
+  %field = rtg.struct_extract %value[x] : !rtg.struct<@Point> -> index
+  func.return %field : index
+}
+
+// CHECK: rtg.struct.decl @Unit {}
+rtg.struct.decl @Unit {}
+
+// CHECK-LABEL: func.func @empty_struct
+func.func @empty_struct() -> !rtg.struct<@Unit> {
+  // CHECK-NEXT: %{{.*}} = rtg.struct_create -> !rtg.struct<@Unit>
+  %value = rtg.struct_create -> !rtg.struct<@Unit>
+  func.return %value : !rtg.struct<@Unit>
+}
+
+// CHECK-LABEL: func.func @empty_struct_constant
+func.func @empty_struct_constant() -> !rtg.struct<@Unit> {
+  // CHECK-NEXT: %{{.*}} = rtg.constant #rtg.struct<> : !rtg.struct<@Unit>
+  %value = rtg.constant #rtg.struct<> : !rtg.struct<@Unit>
+  func.return %value : !rtg.struct<@Unit>
+}
+
+// CHECK: rtg.struct.decl @Inner {
+// CHECK-NEXT:   value: i8
+// CHECK-NEXT: }
+rtg.struct.decl @Inner { value: i8 }
+// CHECK: rtg.struct.decl @Outer {
+// CHECK-NEXT:   child: !rtg.struct<@Inner>,
+// CHECK-NEXT:   enabled: i1
+// CHECK-NEXT: }
+rtg.struct.decl @Outer {
+  child: !rtg.struct<@Inner>,
+  enabled: i1
+}
+
+// CHECK-LABEL: func.func @nested_constant
+func.func @nested_constant() -> !rtg.struct<@Outer> {
+  // CHECK-NEXT: %{{.*}} = rtg.constant #rtg.struct<#rtg.struct<7 : i8> : !rtg.struct<@Inner>, true> : !rtg.struct<@Outer>
+  %value = rtg.constant #rtg.struct<#rtg.struct<7 : i8> : !rtg.struct<@Inner>, true> : !rtg.struct<@Outer>
+  func.return %value : !rtg.struct<@Outer>
+}
+
+// Recursive, mutually recursive, nested-container, and quoted field syntax.
+// CHECK: rtg.struct.decl @Node {
+// CHECK-NEXT:   value: i32,
+// CHECK-NEXT:   next: !rtg.struct<@Node>
+// CHECK-NEXT: }
+rtg.struct.decl @Node { value: i32, next: !rtg.struct<@Node> }
+// CHECK: rtg.struct.decl @Left {
+// CHECK-NEXT:   right: !rtg.struct<@Right>
+// CHECK-NEXT: }
+rtg.struct.decl @Left { right: !rtg.struct<@Right> }
+// CHECK: rtg.struct.decl @Right {
+// CHECK-NEXT:   left: !rtg.struct<@Left>
+// CHECK-NEXT: }
+rtg.struct.decl @Right { left: !rtg.struct<@Left> }
+// CHECK: rtg.struct.decl @ArrayNested {
+// CHECK-NEXT:   children: !rtg.array<!rtg.struct<@Inner>>
+// CHECK-NEXT: }
+rtg.struct.decl @ArrayNested { children: !rtg.array<!rtg.struct<@Inner>> }
+// CHECK: rtg.struct.decl @Quoted {
+// CHECK-NEXT:   "field name": i1
+// CHECK-NEXT: }
+rtg.struct.decl @Quoted { "field name": i1 }
+
 // CHECK-LABEL: @memoryBlocks : !rtg.dict<mem_base_address: i32, mem_block: !rtg.isa.memory_block<32>, mem_size: index>
 rtg.target @memoryBlocks : !rtg.dict<mem_base_address: i32, mem_block: !rtg.isa.memory_block<32>, mem_size: index> {
   // CHECK: rtg.isa.memory_block_declare [0x0 - 0x8] : !rtg.isa.memory_block<32>
@@ -433,3 +527,90 @@ rtg.test @continuation_in_set() {
   // CHECK: rtg.set_create : !rtg.continuation<index>
   %set = rtg.set_create : !rtg.continuation<index>
 }
+
+// Variant declarations, values, and pattern matching.
+// CHECK: rtg.variant.decl @Option {
+// CHECK-NEXT:   None: !rtg.tuple,
+// CHECK-NEXT:   Some: index
+// CHECK-NEXT: }
+rtg.variant.decl @Option {
+  None: !rtg.tuple,
+  Some: index
+}
+
+// CHECK-LABEL: func.func @variant_operations
+func.func @variant_operations(%payload: index,
+                              %value: !rtg.variant<@Option>)
+    -> index {
+  // CHECK: %{{.*}} = rtg.variant_create Some(%arg0) : (index) -> !rtg.variant<@Option>
+  %some = rtg.variant_create Some(%payload) : (index) -> !rtg.variant<@Option>
+  // CHECK: %{{.*}} = rtg.match %arg1 : !rtg.variant<@Option> -> index {
+  %matched = rtg.match %value : !rtg.variant<@Option> -> index {
+    case None(%unit: !rtg.tuple) {
+      %zero = index.constant 0
+      rtg.yield %zero : index
+    }
+    case Some(%matched_payload: index) {
+      rtg.yield %matched_payload : index
+    }
+  }
+  func.return %matched : index
+}
+
+// CHECK-LABEL: func.func @variant_constant
+// CHECK-NEXT: %[[VALUE:.*]] = rtg.constant #rtg.variant<Some, 9 : index> : !rtg.variant<@Option>
+// CHECK-NEXT: return %[[VALUE]] : !rtg.variant<@Option>
+func.func @variant_constant() -> !rtg.variant<@Option> {
+  %value = rtg.constant #rtg.variant<Some, 9 : index> : !rtg.variant<@Option>
+  func.return %value : !rtg.variant<@Option>
+}
+
+// Nullary constructors use the empty RTG tuple. Empty declarations are valid.
+// CHECK: rtg.variant.decl @Tree {
+rtg.variant.decl @Tree {
+  Leaf: index,
+  Branch: !rtg.tuple<!rtg.variant<@Tree>, !rtg.variant<@Tree>>
+}
+// CHECK: rtg.variant.decl @Empty {}
+rtg.variant.decl @Empty {}
+
+// Forward and mutual references remain nominal and do not create cyclic types.
+rtg.variant.decl @VariantLeft { ToRight: !rtg.variant<@VariantRight> }
+rtg.variant.decl @VariantRight { ToLeft: !rtg.variant<@VariantLeft> }
+
+func.func @nullary() -> !rtg.variant<@Option> {
+  %none = rtg.variant_create None() : () -> !rtg.variant<@Option>
+  func.return %none : !rtg.variant<@Option>
+}
+
+rtg.struct.decl @Payload { value: index, valid: i1 }
+rtg.variant.decl @PayloadVariant { "payload-value": !rtg.struct<@Payload> }
+
+// Constructor labels are declaration-local strings, not symbol references.
+func.func @quoted_constructor_label(%payload: !rtg.struct<@Payload>)
+    -> !rtg.variant<@PayloadVariant> {
+  %value = rtg.variant_create "payload-value"(%payload) : (!rtg.struct<@Payload>) -> !rtg.variant<@PayloadVariant>
+  rtg.match %value : !rtg.variant<@PayloadVariant> {
+    case "payload-value"(%matched: !rtg.struct<@Payload>) {
+      rtg.yield
+    }
+  }
+  func.return %value : !rtg.variant<@PayloadVariant>
+}
+
+// Match arms use constructor labels directly, with the declared payload type.
+func.func @match_payload(%value: !rtg.variant<@Option>) -> index {
+  %result = rtg.match %value : !rtg.variant<@Option> -> index {
+    case None(%unit: !rtg.tuple) {
+      %zero = index.constant 0
+      rtg.yield %zero : index
+    }
+    case Some(%payload: index) {
+      rtg.yield %payload : index
+    }
+  }
+  func.return %result : index
+}
+
+// CHECK: rtg.variant.decl @PayloadVariant {
+// CHECK-NEXT:   "payload-value": !rtg.struct<@Payload>

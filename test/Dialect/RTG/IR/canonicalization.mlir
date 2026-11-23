@@ -286,3 +286,80 @@ rtg.test @testIndexToRegister() {
   %31 = rtg.isa.index_to_register %c31 : !rtgtest.ireg
   func.call @dummy7(%31) : (!rtgtest.ireg) -> ()
 }
+
+rtg.struct.decl @Point { x: index, y: i1 }
+
+// CHECK-LABEL: func.func @struct_create_constant
+func.func @struct_create_constant() -> !rtg.struct<@Point> {
+  %x = index.constant 4
+  %y = index.bool.constant true
+  // CHECK-NEXT: %{{.*}} = rtg.constant #rtg.struct<4 : index, true> : !rtg.struct<@Point>
+  %value = rtg.struct_create %x, %y : (index, i1) -> !rtg.struct<@Point>
+  func.return %value : !rtg.struct<@Point>
+}
+
+// CHECK-LABEL: func.func @struct_project_constant
+func.func @struct_project_constant() -> i1 {
+  %value = rtg.constant #rtg.struct<3 : index, 1 : i1> : !rtg.struct<@Point>
+  // CHECK-NEXT: %{{.*}} = rtg.constant true
+  %field = rtg.struct_extract %value[y] : !rtg.struct<@Point> -> i1
+  func.return %field : i1
+}
+
+// CHECK-LABEL: func.func @construct_project
+func.func @construct_project(%x: index, %y: i1) -> i1 {
+  // The projection forwards the non-constant input directly.
+  // CHECK-NEXT: return %arg1 : i1
+  %value = rtg.struct_create %x, %y : (index, i1) -> !rtg.struct<@Point>
+  %field = rtg.struct_extract %value[y] : !rtg.struct<@Point> -> i1
+  func.return %field : i1
+}
+
+rtg.variant.decl @Maybe {
+  None: !rtg.tuple,
+  Some: index
+}
+
+// CHECK-LABEL: func.func @variant_create_constant
+func.func @variant_create_constant() -> !rtg.variant<@Maybe> {
+  %nine = index.constant 9
+  // CHECK: %[[SOME:.*]] = rtg.constant #rtg.variant<Some, 9 : index> : !rtg.variant<@Maybe>
+  %some = rtg.variant_create Some(%nine) : (index) -> !rtg.variant<@Maybe>
+  // CHECK: return %[[SOME]] : !rtg.variant<@Maybe>
+  func.return %some : !rtg.variant<@Maybe>
+}
+
+// CHECK-LABEL: func.func @variant_match_constant
+func.func @variant_match_constant() -> index {
+  %some = rtg.constant #rtg.variant<Some, 9 : index> : !rtg.variant<@Maybe>
+  %matched = rtg.match %some : !rtg.variant<@Maybe> -> index {
+    case Some(%payload: index) {
+      rtg.yield %payload : index
+    }
+    case None(%unit: !rtg.tuple) {
+      %zero = index.constant 0
+      rtg.yield %zero : index
+    }
+  }
+  // CHECK: %[[MATCHED:.*]] = rtg.constant 9 : index
+  // CHECK: return %[[MATCHED]] : index
+  func.return %matched : index
+}
+
+// Matching a constructed variant selects its case even when the payload is
+// non-constant, which cannot be handled by folding to an attribute.
+// CHECK-LABEL: func.func @construct_and_match_variant
+func.func @construct_and_match_variant(%payload: index) -> index {
+  %some = rtg.variant_create Some(%payload) : (index) -> !rtg.variant<@Maybe>
+  %matched = rtg.match %some : !rtg.variant<@Maybe> -> index {
+    case Some(%value: index) {
+      rtg.yield %value : index
+    }
+    case None(%unit: !rtg.tuple) {
+      %zero = index.constant 0
+      rtg.yield %zero : index
+    }
+  }
+  // CHECK-NEXT: return %arg0 : index
+  func.return %matched : index
+}
